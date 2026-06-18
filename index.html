@@ -113,6 +113,7 @@
   </div>
   <div class="spacer"></div>
   <button class="btn primary" id="exportBtn">📋 AIに渡す</button>
+  <button class="btn" id="importBtn" title="AIが返した修正案を図として取り込む">📥 AI案を取込</button>
   <button class="btn icon" id="saveBtn" title="ファイルに保存（全タブ）">💾</button>
   <button class="btn icon" id="loadBtn" title="ファイルを読込">📂</button>
   <button class="btn icon warn" id="clearBtn" title="このタブを全消去">🗑</button>
@@ -156,6 +157,25 @@
       <div class="tab" data-tab="json">JSON</div>
     </div>
     <div class="body"><pre id="exportText"></pre></div>
+  </div>
+</div>
+
+<div class="overlay" id="importOverlay">
+  <div class="modal">
+    <header>
+      <h1 style="font-size:15px">AIの修正案を取り込む</h1>
+      <button class="btn" id="closeImport">閉じる</button>
+    </header>
+    <div class="body">
+      <p style="margin:0 0 8px;font-size:13px;color:var(--sub);line-height:1.6">
+        「AIに渡す」で出したテキストを <b>AIが書き直して返したもの</b>（Mermaid／手順リスト／JSON）を貼り付けてください。<br>
+        <b>新しいタブ</b>に図として表示します（今のタブは消えません）。見比べて良ければ残す、ダメなら × で閉じればOK。
+      </p>
+      <textarea id="importText" placeholder="```mermaid&#10;flowchart TD&#10;  ...&#10;```&#10;などを貼り付け" style="width:100%;height:210px;font-size:12.5px;padding:10px;border:1px solid var(--line);border-radius:8px;font-family:inherit;line-height:1.5;resize:vertical;-webkit-user-select:text;user-select:text"></textarea>
+      <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:10px">
+        <button class="btn primary" id="doImport">図にして新タブで開く</button>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -440,7 +460,7 @@
   function buildMarkdown(){
     if(!cur().nodes.length) return "（まだ手順がありません）";
     const order=topoOrder();
-    return `# ワークフロー: ${cur().title}\n\n以下の手順で作業してください。図と手順リストは同じ内容です。\n\n## フロー図\n${buildMermaid(order)}\n\n## 手順\n${buildSteps(order)}\n---\n_「→」が次の工程、ラベルは分岐の条件です。_`;
+    return `# ワークフロー: ${cur().title}\n\n以下の手順で作業してください。図と手順リストは同じ内容です。\n\n## フロー図\n${buildMermaid(order)}\n\n## 手順\n${buildSteps(order)}\n---\n_「→」が次の工程、ラベルは分岐の条件です。_${roundtripFooter('flow')}`;
   }
   function buildJSON(){
     const deg=degrees();
@@ -487,13 +507,119 @@
     if(!cur().nodes.length) return "（まだ項目がありません）";
     let bullets="";
     mindWalk((n,depth)=>{ bullets+="  ".repeat(depth)+"- "+lbl(n).replace(/\n/g,' ')+"\n"; });
-    return `# マインドマップ: ${cur().title}\n\n中心テーマから枝分かれする発想・要素の整理です。\n\n## マップ図\n${buildMindMermaid()}\n\n## アウトライン\n${bullets}`;
+    return `# マインドマップ: ${cur().title}\n\n中心テーマから枝分かれする発想・要素の整理です。\n\n## マップ図\n${buildMindMermaid()}\n\n## アウトライン\n${bullets}${roundtripFooter('mind')}`;
   }
   function buildMindJSON(){
     const es=cur().edges, seen=new Set();
     function node(n){ if(!n||seen.has(n.id))return null; seen.add(n.id);
       return {label:lbl(n),children:es.filter(e=>e.from===n.id).map(e=>node(nodeById(e.to))).filter(Boolean)}; }
     return JSON.stringify({title:cur().title,mode:'mind',map:mindRoots().map(node).filter(Boolean)},null,2);
+  }
+  function roundtripFooter(kind){
+    const fmt = kind==='mind' ? 'mindmap 形式' : 'flowchart TD 形式';
+    return `\n\n## このフローを改善してもらう場合\n改善案は、上と同じ **Mermaid（${fmt}）** で全体を書き直して返してください。\nだんどりの「📥 AI案を取込」に貼り戻すと、図として見比べられます。`;
+  }
+
+  // ---- import: AIが返した修正案を図に戻す ----
+  function extractMermaid(t){
+    const m=t.match(/```mermaid\s*([\s\S]*?)```/i); if(m)return m[1].trim();
+    if(/^\s*(flowchart|graph|mindmap)\b/i.test(t)) return t.trim();
+    return null;
+  }
+  function fromFlowchart(src){
+    const nodes={}, edges=[], order=[];
+    function ensure(id,label){ if(!nodes[id]){ nodes[id]={id,label:(label!=null&&label!=='')?label:id}; order.push(id); } else if(label!=null&&label!==''){ nodes[id].label=label; } return nodes[id]; }
+    const shapeRe=/([A-Za-z0-9_]+)\s*(\[\(.*?\)\]|\(\[.*?\]\)|\[\[.*?\]\]|\{\{.*?\}\}|\[.*?\]|\(.*?\)|\{.*?\})/g;
+    const lines=src.split('\n').map(l=>l.trim()).filter(l=>l&&!/^(flowchart|graph)\b/i.test(l)&&!l.startsWith('%%'));
+    lines.forEach(line=>{
+      let m; shapeRe.lastIndex=0;
+      while((m=shapeRe.exec(line))){ let lab=m[2].replace(/^[\[\(\{]+|[\]\)\}]+$/g,'').trim().replace(/^["']|["']$/g,''); ensure(m[1],lab); }
+      const clean=line.replace(shapeRe,(mm,id)=>id).replace(/--\s*([^->|]+?)\s*-->/g,(mm,t)=>`-->|${t.trim()}|`);
+      const em=clean.match(/([A-Za-z0-9_]+)\s*[-=.]{2,}>\s*(?:\|\s*["']?(.*?)["']?\s*\|\s*)?([A-Za-z0-9_]+)/);
+      if(em){ ensure(em[1]); ensure(em[3]); edges.push({from:em[1],to:em[3],label:(em[2]||'').trim()}); }
+    });
+    const ns=order.map(id=>nodes[id]);
+    return ns.length?{nodes:ns,edges,mode:'flow',title:'AI修正案'}:null;
+  }
+  function fromIndentTree(lines){
+    const nodes=[], edges=[], stack=[]; let i=0;
+    lines.forEach(L=>{
+      const id='m'+(i++); nodes.push({id,label:L.text});
+      while(stack.length && stack[stack.length-1].indent>=L.indent) stack.pop();
+      if(stack.length) edges.push({from:stack[stack.length-1].id,to:id,label:''});
+      stack.push({id,indent:L.indent});
+    });
+    return {nodes,edges};
+  }
+  function fromMindmap(src){
+    const lines=src.split('\n').filter(l=>l.trim()&&!/^\s*mindmap\b/i.test(l)).map(l=>{
+      const indent=(l.match(/^\s*/)[0]||'').length; let text=l.trim().replace(/^root\s*/i,'');
+      text=text.replace(/^[\(\[\{]+|[\)\]\}]+$/g,'').replace(/^["']|["']$/g,'').trim(); return {indent,text};
+    }).filter(x=>x.text);
+    if(!lines.length)return null;
+    const r=fromIndentTree(lines); r.mode='mind'; r.title='AI修正案（マップ）'; return r;
+  }
+  function fromOutline(text){
+    const lines=text.split('\n').filter(l=>/^\s*[-*・]/.test(l)).map(l=>{
+      const indent=(l.match(/^\s*/)[0]||'').length; let t=l.replace(/^\s*[-*・]\s?/,'').replace(/\*\*/g,'').trim(); return {indent,text:t};
+    }).filter(x=>x.text);
+    if(!lines.length)return null;
+    const r=fromIndentTree(lines); r.mode='mind'; r.title='AI修正案'; return r;
+  }
+  function fromSteps(text){
+    const raw=text.split('\n').filter(l=>/^\s*\d+\.\s/.test(l));
+    if(!raw.length)return null;
+    const nodes=[], edges=[]; let prev=null;
+    raw.forEach((l,i)=>{ let t=l.replace(/^\s*\d+\.\s*/,'').replace(/\*\*/g,'').replace(/〔.*?〕/g,'').trim(); const id='s'+i; nodes.push({id,label:t}); if(prev)edges.push({from:prev,to:id,label:''}); prev=id; });
+    return {nodes,edges,mode:'flow',title:'AI修正案（手順）'};
+  }
+  function fromJSON(o){
+    if(!o||typeof o!=='object'||o.tabs)return null;
+    if(Array.isArray(o.steps)){
+      const nodes=o.steps.map((s,i)=>({id:'j'+i,label:s.label||'(無題)'})), byLabel={}; nodes.forEach(n=>{byLabel[n.label]=n.id;});
+      const edges=[]; o.steps.forEach((s,i)=>{ (s.next||[]).forEach(nx=>{ const to=byLabel[nx&&nx.to]; if(to)edges.push({from:'j'+i,to,label:(nx.when)||''}); }); });
+      return {nodes,edges,mode:o.mode==='mind'?'mind':'flow',title:o.title||'AI修正案'};
+    }
+    if(Array.isArray(o.map)){
+      const nodes=[], edges=[]; let i=0;
+      (function rec(arr,parent){ arr.forEach(it=>{ const id='j'+(i++); nodes.push({id,label:(it&&it.label)||'(無題)'}); if(parent)edges.push({from:parent,to:id,label:''}); if(it&&it.children)rec(it.children,id); }); })(o.map,null);
+      return nodes.length?{nodes,edges,mode:'mind',title:o.title||'AI修正案'}:null;
+    }
+    if(Array.isArray(o.nodes)) return {nodes:o.nodes.map(n=>({id:n.id,label:n.label||''})),edges:(o.edges||[]).map(e=>({from:e.from,to:e.to,label:e.label||''})),mode:o.mode==='mind'?'mind':'flow',title:o.title||'AI修正案'};
+    return null;
+  }
+  function parseImport(text){
+    text=text.trim(); if(!text)return null;
+    if(/^[\[{]/.test(text)){ try{ const r=fromJSON(JSON.parse(text)); if(r)return r; }catch(e){} }
+    const mer=extractMermaid(text);
+    if(mer){ if(/^\s*mindmap/im.test(mer))return fromMindmap(mer); const f=fromFlowchart(mer); if(f)return f; }
+    if(/^\s*[-*・]/m.test(text)) return fromOutline(text);
+    if(/^\s*\d+\.\s/m.test(text)) return fromSteps(text);
+    return null;
+  }
+  function autoLayout(nodes,edges){
+    if(!nodes.length)return;
+    const childrenOf={}, indeg={}; nodes.forEach(n=>{indeg[n.id]=0;});
+    edges.forEach(e=>{ (childrenOf[e.from]=childrenOf[e.from]||[]).push(e.to); if(indeg[e.to]!=null)indeg[e.to]++; });
+    let roots=nodes.filter(n=>indeg[n.id]===0); if(!roots.length)roots=[nodes[0]];
+    const depth={}, q=[]; roots.forEach(r=>{depth[r.id]=0;q.push(r.id);}); const seen=new Set(q);
+    while(q.length){ const id=q.shift(); (childrenOf[id]||[]).forEach(c=>{ const nd=(depth[id]||0)+1; if(depth[c]==null||nd>depth[c])depth[c]=nd; if(!seen.has(c)){seen.add(c);q.push(c);} }); }
+    nodes.forEach(n=>{ if(depth[n.id]==null)depth[n.id]=0; });
+    const byDepth={}; nodes.forEach(n=>{ (byDepth[depth[n.id]]=byDepth[depth[n.id]]||[]).push(n); });
+    const baseX=Math.round(wrap.scrollLeft+60), baseY=Math.round(wrap.scrollTop+60), dx=250, dy=150;
+    Object.keys(byDepth).forEach(d=>{ byDepth[d].forEach((n,i)=>{ n.x=baseX+i*dx; n.y=baseY+(+d)*dy; }); });
+  }
+  function importToNewTab(text){
+    if(!text||!text.trim()){ hint('テキストを貼り付けてください'); return false; }
+    let parsed=null; try{ parsed=parseImport(text); }catch(e){ parsed=null; }
+    if(!parsed||!parsed.nodes||!parsed.nodes.length){ hint('読み取れませんでした。Mermaidか手順テキストを貼ってください'); return false; }
+    const idmap={}, t=newTab(parsed.title||'AI修正案'); t.mode=parsed.mode==='mind'?'mind':'flow';
+    parsed.nodes.forEach(n=>{ const nid=uid(); idmap[n.id]=nid; t.nodes.push({id:nid,label:(n.label||'').toString().trim(),x:0,y:0}); });
+    parsed.edges.forEach(e=>{ if(idmap[e.from]&&idmap[e.to]&&idmap[e.from]!==idmap[e.to]) t.edges.push({id:uid(),from:idmap[e.from],to:idmap[e.to],label:e.label||''}); });
+    autoLayout(t.nodes,t.edges);
+    doc.tabs.push(t); doc.activeTab=doc.tabs.length-1;
+    rebuild(); save();
+    return true;
   }
 
   let exportTab='md';
@@ -579,11 +705,15 @@
     r.readAsText(f); e.target.value='';
   });
   document.getElementById('clearBtn').addEventListener('click',()=>{ if(confirm("このタブを全て消去しますか？")){ cur().nodes=[]; cur().edges=[]; canvas.querySelectorAll('.node').forEach(el=>el.remove()); sel=null; renderAll(); save(); } });
+  document.getElementById('importBtn').addEventListener('click',()=>{ document.getElementById('importText').value=''; document.getElementById('importOverlay').classList.add('show'); setTimeout(()=>document.getElementById('importText').focus(),0); });
+  document.getElementById('closeImport').addEventListener('click',()=>document.getElementById('importOverlay').classList.remove('show'));
+  document.getElementById('importOverlay').addEventListener('pointerdown',e=>{ if(e.target.id==='importOverlay')e.currentTarget.classList.remove('show'); });
+  document.getElementById('doImport').addEventListener('click',()=>{ if(importToNewTab(document.getElementById('importText').value)){ document.getElementById('importOverlay').classList.remove('show'); hint('新しいタブに図として表示しました'); } });
 
   canvas.addEventListener('dblclick',e=>{ if(e.target!==canvas&&e.target!==svg&&e.target!==emptyEl&&!emptyEl.contains(e.target))return; const r=canvas.getBoundingClientRect(); addNodeAt(e.clientX-r.left,e.clientY-r.top); });
   canvas.addEventListener('pointerdown',e=>{ if(e.target===canvas||e.target===svg) clearSel(); });
   window.addEventListener('keydown',e=>{
-    if(e.key==='Escape'){ if(connectFrom)endConnect(); else clearSel(); document.getElementById('exportOverlay').classList.remove('show'); }
+    if(e.key==='Escape'){ if(connectFrom)endConnect(); else clearSel(); document.getElementById('exportOverlay').classList.remove('show'); document.getElementById('importOverlay').classList.remove('show'); }
     const editing=document.activeElement&&document.activeElement.isContentEditable;
     if((e.key==='Delete'||e.key==='Backspace')&&!editing&&sel){ e.preventDefault(); deleteSel(); }
   });
