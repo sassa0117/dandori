@@ -12,7 +12,7 @@
   :root{
     --bg:#f4f6fa; --panel:#ffffff; --ink:#1f2733; --sub:#5b6675;
     --line:#d7deea; --accent:#009ef3; --accent2:#ff7f07;
-    --node:#ffffff; --node-start:#e3f7ea; --node-end:#fde7e7; --node-branch:#fff4e0;
+    --node:#ffffff; --node-start:#e3f7ea; --node-end:#fde7e7; --node-branch:#fff4e0; --node-center:#e7f3ff;
     --shadow:0 2px 8px rgba(31,39,51,.08);
   }
   *{box-sizing:border-box;-webkit-user-select:none;user-select:none}
@@ -29,6 +29,23 @@
   .btn.primary:hover{background:#0086d4}
   .btn.icon{padding:7px 9px}
   .btn.warn:hover{border-color:#e0484b;color:#e0484b}
+
+  .modetoggle{display:flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+  .modetoggle button{font-size:12.5px;padding:6px 11px;border:none;background:#fff;cursor:pointer;color:var(--sub);white-space:nowrap}
+  .modetoggle button.on{background:var(--accent);color:#fff;font-weight:700}
+
+  #tabbar{display:flex;align-items:flex-end;gap:4px;padding:5px 10px 0;background:var(--panel);border-bottom:1px solid var(--line);overflow-x:auto}
+  #tabbar::-webkit-scrollbar{height:6px}
+  .ftab{display:flex;align-items:center;gap:6px;padding:7px 10px;border:1px solid var(--line);border-bottom:none;
+    border-radius:9px 9px 0 0;background:#eef2f8;font-size:13px;cursor:pointer;white-space:nowrap;flex:0 0 auto}
+  .ftab .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:140px}
+  .ftab .mk{font-size:11px;opacity:.7}
+  .ftab.active{background:#fff;color:var(--accent);font-weight:700;box-shadow:0 2px 0 var(--accent) inset}
+  .ftab .x{font-size:14px;color:var(--sub);border-radius:5px;width:17px;height:17px;line-height:15px;text-align:center}
+  .ftab .x:hover{background:#e0484b;color:#fff}
+  #addTab{font-size:17px;line-height:1;padding:6px 11px;border:1px dashed var(--line);background:#fff;border-radius:9px 9px 0 0;
+    cursor:pointer;color:var(--sub);flex:0 0 auto}
+  #addTab:hover{border-color:var(--accent);color:var(--accent)}
 
   main{flex:1;position:relative;overflow:hidden}
   #canvasWrap{position:absolute;inset:0;overflow:auto}
@@ -50,6 +67,7 @@
   .node.t-start{background:var(--node-start);border-color:#9bd9b3}
   .node.t-end{background:var(--node-end);border-color:#e9a9aa}
   .node.t-branch{background:var(--node-branch);border-color:#f0c987}
+  .node.t-center{background:var(--node-center);border-color:#9bd0f5;font-weight:700}
   .node.connect-target{outline:3px dashed var(--accent2);outline-offset:2px}
 
   .handle{position:absolute;left:50%;bottom:-10px;transform:translateX(-50%);width:18px;height:18px;border-radius:50%;
@@ -89,13 +107,19 @@
 <header>
   <h1>🧩 だんどり</h1>
   <input class="title" id="flowTitle" value="無題のワークフロー" />
+  <div class="modetoggle" id="modeToggle">
+    <button data-mode="flow">↧ フロー</button>
+    <button data-mode="mind">✺ マップ</button>
+  </div>
   <div class="spacer"></div>
   <button class="btn primary" id="exportBtn">📋 AIに渡す</button>
-  <button class="btn icon" id="saveBtn" title="ファイルに保存">💾</button>
+  <button class="btn icon" id="saveBtn" title="ファイルに保存（全タブ）">💾</button>
   <button class="btn icon" id="loadBtn" title="ファイルを読込">📂</button>
-  <button class="btn icon warn" id="clearBtn" title="全消去">🗑</button>
+  <button class="btn icon warn" id="clearBtn" title="このタブを全消去">🗑</button>
   <input type="file" id="fileInput" accept=".json" style="display:none">
 </header>
+
+<div id="tabbar"></div>
 
 <main>
   <div id="canvasWrap">
@@ -128,7 +152,7 @@
       </div>
     </header>
     <div class="tabs">
-      <div class="tab active" data-tab="md">手順テキスト（推奨）</div>
+      <div class="tab active" data-tab="md">テキスト（推奨）</div>
       <div class="tab" data-tab="json">JSON</div>
     </div>
     <div class="body"><pre id="exportText"></pre></div>
@@ -138,27 +162,34 @@
 <script>
 (function(){
   "use strict";
-  const TAG = {start:"開始",end:"終了",branch:"分岐",task:"手順"};
-  const LS_KEY = "flow-tool-state-v2";
-  let state = { title:"無題のワークフロー", nodes:[], edges:[] };
+  const TAG = {start:"開始",end:"終了",branch:"分岐",task:"手順",center:"中心"};
+  const LS_KEY = "flow-tool-state-v3", OLD_KEY = "flow-tool-state-v2";
+  let doc = null;                 // { activeTab, tabs:[ {id,title,mode,nodes,edges} ] }
   let seq = 1, sel = null, connectFrom = null;
 
   const canvas=document.getElementById('canvas'), wrap=document.getElementById('canvasWrap');
   const svg=document.getElementById('edges'), hintEl=document.getElementById('hint'), emptyEl=document.getElementById('empty');
+  const tabbar=document.getElementById('tabbar'), titleInput=document.getElementById('flowTitle'), modeToggle=document.getElementById('modeToggle');
 
   const uid=()=>'n'+(seq++)+'_'+Math.floor(Math.random()*1e4);
-  const nodeById=id=>state.nodes.find(n=>n.id===id);
+  const cur=()=>doc.tabs[doc.activeTab];
+  const isMind=()=>cur().mode==='mind';
+  const nodeById=id=>cur().nodes.find(n=>n.id===id);
   function hint(t){ hintEl.textContent=t; hintEl.classList.add('show'); clearTimeout(hint._t); hint._t=setTimeout(()=>hintEl.classList.remove('show'),2200); }
+
+  function newTab(title){ return {id:'t'+(seq++)+'_'+Math.floor(Math.random()*1e4), title:title||"無題のワークフロー", mode:'flow', nodes:[], edges:[]}; }
+  function newDoc(){ return {activeTab:0, tabs:[newTab()]}; }
 
   // ---- derive type from graph structure (user never picks) ----
   function degrees(){
     const ind={},outd={};
-    state.nodes.forEach(n=>{ind[n.id]=0;outd[n.id]=0;});
-    state.edges.forEach(e=>{ if(outd[e.from]!=null)outd[e.from]++; if(ind[e.to]!=null)ind[e.to]++; });
+    cur().nodes.forEach(n=>{ind[n.id]=0;outd[n.id]=0;});
+    cur().edges.forEach(e=>{ if(outd[e.from]!=null)outd[e.from]++; if(ind[e.to]!=null)ind[e.to]++; });
     return {ind,outd};
   }
   function typeOf(n,deg){
     const i=deg.ind[n.id]||0, o=deg.outd[n.id]||0;
+    if(isMind()) return i===0 ? 'center' : 'task';
     if(i===0&&o===0) return 'task';
     if(i===0) return 'start';
     if(o===0) return 'end';
@@ -169,7 +200,7 @@
   // ---- add ----
   function addNodeAt(cx,cy,edit=true){
     const n={id:uid(),label:"",x:Math.round(cx-70),y:Math.round(cy-22)};
-    state.nodes.push(n); renderAll(); selectNode(n.id);
+    cur().nodes.push(n); renderAll(); selectNode(n.id);
     if(edit) setTimeout(()=>editNode(n.id),0);
     save();
   }
@@ -188,11 +219,25 @@
     const lab=el.querySelector('.label');
     if(!lab.isContentEditable){ lab.textContent=n.label||''; lab.dataset.empty = n.label?'':'1'; if(!n.label) lab.style.color='var(--sub)', lab.textContent='（クリックで入力）'; else lab.style.color=''; }
   }
+  function updateEmpty(){
+    if(isMind()){
+      emptyEl.innerHTML=`<div class="big">考えを枝で広げる</div>
+        <div>どこでも <kbd>ダブルクリック</kbd> で項目を1つ追加</div>
+        <div>箱の○を別の箱へドラッグして枝でつなぐ</div>
+        <div>中心から自由な向きに広げられます</div>`;
+    }else{
+      emptyEl.innerHTML=`<div class="big">作業の流れを置いていくだけ</div>
+        <div>どこでも <kbd>ダブルクリック</kbd> で手順を1つ追加</div>
+        <div>箱の下の○を次の箱へドラッグして矢印でつなぐ</div>
+        <div>種類（開始 / 分岐 / 終了）は自動で判定されます</div>`;
+    }
+  }
   function renderAll(){
     const deg=degrees();
-    state.nodes.forEach(n=>renderNode(n,typeOf(n,deg)));
+    cur().nodes.forEach(n=>renderNode(n,typeOf(n,deg)));
     drawEdges();
-    emptyEl.style.display = state.nodes.length? 'none':'block';
+    updateEmpty();
+    emptyEl.style.display = cur().nodes.length? 'none':'block';
   }
 
   function editNode(id){
@@ -225,7 +270,7 @@
     el.addEventListener('dblclick',e=>{ if(e.target===handle)return; e.stopPropagation(); editNode(n.id); });
     lab.addEventListener('blur',()=>{
       lab.contentEditable='false'; n.label=lab.textContent.trim();
-      renderAll(); save();
+      renderAll(); renderTabs(); save();
     });
     lab.addEventListener('keydown',e=>{ if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); lab.blur(); } if(e.key==='Escape'){ e.preventDefault(); lab.blur(); } });
     handle.addEventListener('pointerdown',e=>{ e.stopPropagation(); e.preventDefault(); startConnect(n.id); });
@@ -237,7 +282,7 @@
     connectFrom=fromId;
     document.getElementById(fromId).classList.add('connecting');
     document.querySelectorAll('.node').forEach(el=>{ if(el.id!==fromId) el.classList.add('connect-target'); });
-    hint("つなぎ先のステップをクリック（Escで中止）");
+    hint(isMind()?"つなぎ先の項目をクリック（Escで中止）":"つなぎ先のステップをクリック（Escで中止）");
     tempLine=document.createElementNS('http://www.w3.org/2000/svg','path');
     tempLine.setAttribute('stroke','#ff7f07'); tempLine.setAttribute('stroke-width','2');
     tempLine.setAttribute('stroke-dasharray','5 4'); tempLine.setAttribute('fill','none');
@@ -247,8 +292,13 @@
   }
   function moveTemp(e){
     if(!connectFrom)return;
-    const a=anchor(nodeById(connectFrom),'out'), r=canvas.getBoundingClientRect();
-    tempLine.setAttribute('d',path(a.x,a.y,e.clientX-r.left,e.clientY-r.top));
+    const r=canvas.getBoundingClientRect();
+    const cx=e.clientX-r.left, cy=e.clientY-r.top;
+    const ra=rectOf(nodeById(connectFrom));
+    const dx=cx-ra.cx, dy=cy-ra.cy;
+    const d1 = Math.abs(dx)>Math.abs(dy) ? (dx>0?'R':'L') : (dy>0?'B':'T');
+    const p1=sidePoint(ra,d1);
+    tempLine.setAttribute('d',path2(p1,{x:cx,y:cy},d1,oppDir(d1)));
   }
   function pickTarget(e){
     const el=e.target.closest('.node');
@@ -265,16 +315,15 @@
   }
   function createEdge(from,to){
     if(from===to) return;
-    if(state.edges.some(e=>e.from===from&&e.to===to)){ hint("もうつながっています"); return; }
-    const existing=state.edges.filter(e=>e.from===from);
+    if(cur().edges.some(e=>e.from===from&&e.to===to)){ hint("もうつながっています"); return; }
+    const existing=cur().edges.filter(e=>e.from===from);
     const ed={id:uid(),from,to,label:""};
-    state.edges.push(ed);
-    // becoming a branch (2+ outgoing) -> ask condition labels
-    if(existing.length>=1){
+    cur().edges.push(ed);
+    // flow only: becoming a branch (2+ outgoing) -> ask condition labels
+    if(!isMind() && existing.length>=1){
       const tn=nodeById(to);
       const v=prompt(`分岐です。この矢印の条件は？（例: はい / 成功 / 在庫あり）\n→「${tn.label||'(無題)'}」`,"");
       if(v) ed.label=v.trim();
-      // backfill the first sibling if it has no label yet
       const first=existing[0];
       if(first && !first.label){
         const fn=nodeById(first.to);
@@ -285,120 +334,251 @@
     renderAll(); save();
   }
 
-  // ---- edges ----
-  function anchor(n,side){
+  // ---- edges: nearest-side anchoring (works for flow & mindmap directions) ----
+  function rectOf(n){
     const el=document.getElementById(n.id), w=el?el.offsetWidth:140, h=el?el.offsetHeight:48;
-    return side==='out' ? {x:n.x+w/2,y:n.y+h} : {x:n.x+w/2,y:n.y};
+    return {x:n.x,y:n.y,w,h,cx:n.x+w/2,cy:n.y+h/2};
   }
-  function path(x1,y1,x2,y2){ const dy=Math.max(40,Math.abs(y2-y1)*0.5); return `M ${x1},${y1} C ${x1},${y1+dy} ${x2},${y2-dy} ${x2},${y2}`; }
+  function sidePoint(r,dir){
+    switch(dir){
+      case 'T': return {x:r.cx, y:r.y};
+      case 'B': return {x:r.cx, y:r.y+r.h};
+      case 'L': return {x:r.x,  y:r.cy};
+      default : return {x:r.x+r.w, y:r.cy}; // 'R'
+    }
+  }
+  function oppDir(d){ return d==='T'?'B':d==='B'?'T':d==='L'?'R':'L'; }
+  function dirVec(d){ return d==='T'?[0,-1]:d==='B'?[0,1]:d==='L'?[-1,0]:[1,0]; }
+  function edgeAnchors(a,b){
+    const ra=rectOf(a), rb=rectOf(b);
+    const dx=rb.cx-ra.cx, dy=rb.cy-ra.cy;
+    let aDir,bDir;
+    if(Math.abs(dx)>=Math.abs(dy)){ aDir=dx>=0?'R':'L'; }
+    else { aDir=dy>=0?'B':'T'; }
+    bDir=oppDir(aDir);
+    return {p1:sidePoint(ra,aDir), p2:sidePoint(rb,bDir), aDir, bDir};
+  }
+  function path2(p1,p2,d1,d2){
+    const dist=Math.hypot(p2.x-p1.x,p2.y-p1.y), k=Math.max(36,dist*0.4);
+    const v1=dirVec(d1), v2=dirVec(d2);
+    const c1={x:p1.x+v1[0]*k, y:p1.y+v1[1]*k}, c2={x:p2.x+v2[0]*k, y:p2.y+v2[1]*k};
+    return `M ${p1.x},${p1.y} C ${c1.x},${c1.y} ${c2.x},${c2.y} ${p2.x},${p2.y}`;
+  }
   function drawEdges(){
     [...svg.querySelectorAll('g.eg')].forEach(g=>g.remove());
-    for(const ed of state.edges){
+    const mind=isMind();
+    for(const ed of cur().edges){
       const a=nodeById(ed.from), b=nodeById(ed.to); if(!a||!b)continue;
-      const p1=anchor(a,'out'), p2=anchor(b,'in'), d=path(p1.x,p1.y,p2.x,p2.y);
+      const an=edgeAnchors(a,b), d=path2(an.p1,an.p2,an.aDir,an.bDir);
       const g=document.createElementNS('http://www.w3.org/2000/svg','g'); g.setAttribute('class','eg');
       const hit=document.createElementNS('http://www.w3.org/2000/svg','path'); hit.setAttribute('class','edge hit'); hit.setAttribute('d',d);
       const isSel=sel&&sel.kind==='edge'&&sel.id===ed.id;
       const vis=document.createElementNS('http://www.w3.org/2000/svg','path');
       vis.setAttribute('class','edge'+(isSel?' sel':'')); vis.setAttribute('d',d);
-      vis.setAttribute('marker-end',isSel?'url(#arrowSel)':'url(#arrow)');
+      if(!mind) vis.setAttribute('marker-end',isSel?'url(#arrowSel)':'url(#arrow)');
       g.appendChild(vis); g.appendChild(hit);
       const pick=e=>{e.stopPropagation();selectEdge(ed.id);};
       hit.addEventListener('pointerdown',pick); vis.addEventListener('pointerdown',pick);
       hit.addEventListener('dblclick',e=>{e.stopPropagation();editEdgeLabel(ed);});
       if(ed.label){
         const t=document.createElementNS('http://www.w3.org/2000/svg','text');
-        const sameX=Math.abs(p1.x-p2.x)<6;
-        t.setAttribute('x',(p1.x+p2.x)/2 + (sameX?8:0)); t.setAttribute('y',(p1.y+p2.y)/2);
-        t.setAttribute('class','elabel'); t.setAttribute('text-anchor',sameX?'start':'middle'); t.textContent=ed.label;
+        t.setAttribute('x',(an.p1.x+an.p2.x)/2); t.setAttribute('y',(an.p1.y+an.p2.y)/2);
+        t.setAttribute('class','elabel'); t.setAttribute('text-anchor','middle'); t.textContent=ed.label;
         t.addEventListener('pointerdown',pick); t.addEventListener('dblclick',e=>{e.stopPropagation();editEdgeLabel(ed);});
         g.appendChild(t);
       }
       svg.appendChild(g);
     }
   }
-  function editEdgeLabel(ed){ const v=prompt("矢印の条件ラベル",ed.label||""); if(v!==null){ ed.label=v.trim(); drawEdges(); save(); } }
+  function editEdgeLabel(ed){ const v=prompt("矢印・枝のラベル",ed.label||""); if(v!==null){ ed.label=v.trim(); drawEdges(); save(); } }
 
   // ---- selection ----
   function selectNode(id){ sel={kind:'node',id}; refreshSel(); }
   function selectEdge(id){ sel={kind:'edge',id}; refreshSel(); }
   function clearSel(){ sel=null; refreshSel(); }
-  function refreshSel(){ const deg=degrees(); document.querySelectorAll('.node').forEach(el=>{ const n=nodeById(el.id); if(n) el.classList.toggle('sel',sel&&sel.kind==='node'&&sel.id===el.id); }); drawEdges(); }
+  function refreshSel(){ document.querySelectorAll('.node').forEach(el=>{ const n=nodeById(el.id); if(n) el.classList.toggle('sel',sel&&sel.kind==='node'&&sel.id===el.id); }); drawEdges(); }
   function deleteSel(){
     if(!sel)return;
-    if(sel.kind==='node'){ state.nodes=state.nodes.filter(n=>n.id!==sel.id); state.edges=state.edges.filter(e=>e.from!==sel.id&&e.to!==sel.id); document.getElementById(sel.id)?.remove(); }
-    else state.edges=state.edges.filter(e=>e.id!==sel.id);
+    if(sel.kind==='node'){ cur().nodes=cur().nodes.filter(n=>n.id!==sel.id); cur().edges=cur().edges.filter(e=>e.from!==sel.id&&e.to!==sel.id); document.getElementById(sel.id)?.remove(); }
+    else cur().edges=cur().edges.filter(e=>e.id!==sel.id);
     sel=null; renderAll(); save();
   }
 
-  // ---- export ----
+  // ---- export: flow ----
   function topoOrder(){
     const deg=degrees(), inc={...deg.ind};
-    const queue=state.nodes.filter(n=>(deg.ind[n.id]||0)===0).sort((a,b)=>a.y-b.y||a.x-b.x);
+    const queue=cur().nodes.filter(n=>(deg.ind[n.id]||0)===0).sort((a,b)=>a.y-b.y||a.x-b.x);
     const seen=new Set(), order=[];
     while(queue.length){
       const n=queue.shift(); if(seen.has(n.id))continue; seen.add(n.id); order.push(n);
-      state.edges.filter(e=>e.from===n.id).forEach(e=>{ inc[e.to]--; if(inc[e.to]<=0){ const t=nodeById(e.to); if(t&&!seen.has(t.id))queue.push(t);} });
+      cur().edges.filter(e=>e.from===n.id).forEach(e=>{ inc[e.to]--; if(inc[e.to]<=0){ const t=nodeById(e.to); if(t&&!seen.has(t.id))queue.push(t);} });
     }
-    state.nodes.forEach(n=>{ if(!seen.has(n.id))order.push(n); });
+    cur().nodes.forEach(n=>{ if(!seen.has(n.id))order.push(n); });
     return order;
   }
   const esc=s=>(s||'').replace(/\n/g,' ').replace(/"/g,"'");
-  function lbl(n){ return (n.label&&n.label.trim())||'(無題)'; }
+  function lbl(n){ return (n&&n.label&&n.label.trim())||'(無題)'; }
   function buildMermaid(order){
     const idx={}; order.forEach((n,i)=>idx[n.id]=i);
     const deg=degrees();
-    const shape={start:["([","])"],end:["([","])"],branch:["{","}"],task:["[","]"]};
+    const shape={start:["([","])"],end:["([","])"],branch:["{","}"],task:["[","]"],center:["((","))"]};
     let out="```mermaid\nflowchart TD\n";
     order.forEach((n,i)=>{ const s=shape[typeOf(n,deg)]; out+=`  N${i+1}${s[0]}"${esc(lbl(n))}"${s[1]}\n`; });
-    state.edges.forEach(e=>{ const a=idx[e.from],b=idx[e.to]; if(a==null||b==null)return; out+=`  N${a+1} -->${e.label?`|"${esc(e.label)}"|`:''} N${b+1}\n`; });
+    cur().edges.forEach(e=>{ const a=idx[e.from],b=idx[e.to]; if(a==null||b==null)return; out+=`  N${a+1} -->${e.label?`|"${esc(e.label)}"|`:''} N${b+1}\n`; });
     return out+"```";
   }
   function buildSteps(order){
     const deg=degrees(); let out="";
     order.forEach((n,i)=>{
       out+=`${i+1}. **${lbl(n).replace(/\n/g,' ')}**${typeOf(n,deg)==='branch'?' 〔分岐〕':''}\n`;
-      const outs=state.edges.filter(e=>e.from===n.id);
+      const outs=cur().edges.filter(e=>e.from===n.id);
       outs.forEach(e=>{ const t=nodeById(e.to); if(!t)return; const c=e.label?`「${e.label}」なら `:''; out+=`   - → ${c}「${lbl(t).replace(/\n/g,' ')}」へ\n`; });
       if(!outs.length && typeOf(n,deg)!=='end') out+=`   - （次なし）\n`;
     });
     return out;
   }
   function buildMarkdown(){
-    if(!state.nodes.length) return "（まだ手順がありません）";
+    if(!cur().nodes.length) return "（まだ手順がありません）";
     const order=topoOrder();
-    return `# ワークフロー: ${state.title}\n\n以下の手順で作業してください。図と手順リストは同じ内容です。\n\n## フロー図\n${buildMermaid(order)}\n\n## 手順\n${buildSteps(order)}\n---\n_「→」が次の工程、ラベルは分岐の条件です。_`;
+    return `# ワークフロー: ${cur().title}\n\n以下の手順で作業してください。図と手順リストは同じ内容です。\n\n## フロー図\n${buildMermaid(order)}\n\n## 手順\n${buildSteps(order)}\n---\n_「→」が次の工程、ラベルは分岐の条件です。_`;
   }
   function buildJSON(){
     const deg=degrees();
-    return JSON.stringify({title:state.title,steps:topoOrder().map(n=>({label:lbl(n),type:typeOf(n,deg),next:state.edges.filter(e=>e.from===n.id).map(e=>({to:lbl(nodeById(e.to)),when:e.label||undefined}))})) },null,2);
+    return JSON.stringify({title:cur().title,mode:'flow',steps:topoOrder().map(n=>({label:lbl(n),type:typeOf(n,deg),next:cur().edges.filter(e=>e.from===n.id).map(e=>({to:lbl(nodeById(e.to)),when:e.label||undefined}))})) },null,2);
   }
+
+  // ---- export: mindmap ----
+  function mindRoots(){
+    const ns=cur().nodes, es=cur().edges;
+    let roots=ns.filter(n=>!es.some(e=>e.to===n.id));
+    if(!roots.length && ns.length) roots=[ns.slice().sort((a,b)=>a.y-b.y||a.x-b.x)[0]];
+    return roots;
+  }
+  function mindWalk(cb){
+    const es=cur().edges, visited=new Set();
+    function dfs(n,depth){ if(!n||visited.has(n.id))return; visited.add(n.id); cb(n,depth);
+      es.filter(e=>e.from===n.id).forEach(e=>dfs(nodeById(e.to),depth+1)); }
+    mindRoots().forEach(r=>dfs(r,0));
+    cur().nodes.forEach(n=>{ if(!visited.has(n.id)){ visited.add(n.id); cb(n,0); } });
+  }
+  function buildMindMermaid(){
+    const es=cur().edges, roots=mindRoots(), visited=new Set();
+    const clean=n=>lbl(n).replace(/\n/g,' ').replace(/[()\[\]{}]/g,'').trim()||'項目';
+    let out="```mermaid\nmindmap\n";
+    if(roots.length===1){
+      (function dfs(n,depth){ if(!n||visited.has(n.id))return; visited.add(n.id);
+        const ind="  ".repeat(depth+1);
+        out+= depth===0 ? `${ind}root((${clean(n)}))\n` : `${ind}${clean(n)}\n`;
+        es.filter(e=>e.from===n.id).forEach(e=>dfs(nodeById(e.to),depth+1));
+      })(roots[0],0);
+    }else{
+      out+="  root(("+(cur().title.replace(/[()\[\]{}]/g,'')||'マップ')+"))\n";
+      roots.forEach(r=>{
+        (function dfs(n,depth){ if(!n||visited.has(n.id))return; visited.add(n.id);
+          out+="  ".repeat(depth+1)+clean(n)+"\n";
+          es.filter(e=>e.from===n.id).forEach(e=>dfs(nodeById(e.to),depth+1));
+        })(r,1);
+      });
+    }
+    cur().nodes.forEach(n=>{ if(!visited.has(n.id)){ visited.add(n.id); out+="    "+clean(n)+"\n"; } });
+    return out+"```";
+  }
+  function buildMindOutline(){
+    if(!cur().nodes.length) return "（まだ項目がありません）";
+    let bullets="";
+    mindWalk((n,depth)=>{ bullets+="  ".repeat(depth)+"- "+lbl(n).replace(/\n/g,' ')+"\n"; });
+    return `# マインドマップ: ${cur().title}\n\n中心テーマから枝分かれする発想・要素の整理です。\n\n## マップ図\n${buildMindMermaid()}\n\n## アウトライン\n${bullets}`;
+  }
+  function buildMindJSON(){
+    const es=cur().edges, seen=new Set();
+    function node(n){ if(!n||seen.has(n.id))return null; seen.add(n.id);
+      return {label:lbl(n),children:es.filter(e=>e.from===n.id).map(e=>node(nodeById(e.to))).filter(Boolean)}; }
+    return JSON.stringify({title:cur().title,mode:'mind',map:mindRoots().map(node).filter(Boolean)},null,2);
+  }
+
   let exportTab='md';
-  function showExport(){ document.getElementById('exportText').textContent= exportTab==='md'?buildMarkdown():buildJSON(); document.getElementById('exportOverlay').classList.add('show'); }
+  function buildExport(){
+    if(isMind()) return exportTab==='md'?buildMindOutline():buildMindJSON();
+    return exportTab==='md'?buildMarkdown():buildJSON();
+  }
+  function showExport(){ document.getElementById('exportText').textContent=buildExport(); document.getElementById('exportOverlay').classList.add('show'); }
+
+  // ---- tabs UI ----
+  function renderTabs(){
+    tabbar.innerHTML='';
+    doc.tabs.forEach((t,i)=>{
+      const el=document.createElement('div'); el.className='ftab'+(i===doc.activeTab?' active':'');
+      const mk=document.createElement('span'); mk.className='mk'; mk.textContent=t.mode==='mind'?'✺':'↧'; el.appendChild(mk);
+      const nm=document.createElement('span'); nm.className='nm'; nm.textContent=t.title||'無題'; el.appendChild(nm);
+      if(doc.tabs.length>1){
+        const x=document.createElement('span'); x.className='x'; x.textContent='×'; x.title='このタブを閉じる';
+        x.addEventListener('click',ev=>{ev.stopPropagation();closeTab(i);}); el.appendChild(x);
+      }
+      el.addEventListener('click',()=>switchTab(i));
+      el.addEventListener('dblclick',ev=>{ev.stopPropagation(); switchTab(i); titleInput.focus(); titleInput.select();});
+      tabbar.appendChild(el);
+    });
+    const add=document.createElement('button'); add.id='addTab'; add.textContent='＋'; add.title='タブを追加';
+    add.addEventListener('click',addTab); tabbar.appendChild(add);
+  }
+  function syncHeader(){ titleInput.value=cur().title; modeToggle.querySelectorAll('button').forEach(b=>b.classList.toggle('on',b.dataset.mode===cur().mode)); }
+  function rebuild(){ sel=null; if(connectFrom)endConnect(); canvas.querySelectorAll('.node').forEach(el=>el.remove()); syncHeader(); renderTabs(); renderAll(); }
+  function switchTab(i){ if(i===doc.activeTab)return; doc.activeTab=i; rebuild(); save(); }
+  function addTab(){ doc.tabs.push(newTab("ワークフロー"+(doc.tabs.length+1))); doc.activeTab=doc.tabs.length-1; rebuild(); save(); setTimeout(()=>titleInput.select(),0); }
+  function closeTab(i){
+    const t=doc.tabs[i];
+    if(t.nodes&&t.nodes.length && !confirm(`「${t.title||'無題'}」を閉じますか？（中身も消えます）`)) return;
+    doc.tabs.splice(i,1);
+    if(!doc.tabs.length) doc.tabs.push(newTab());
+    if(doc.activeTab>=doc.tabs.length) doc.activeTab=doc.tabs.length-1;
+    if(doc.activeTab<0) doc.activeTab=0;
+    rebuild(); save();
+  }
 
   // ---- persistence ----
-  function save(){ try{ localStorage.setItem(LS_KEY,JSON.stringify(state)); }catch(e){} }
-  function load(obj){
-    state=obj; seq=1;
-    document.getElementById('flowTitle').value=state.title||"無題のワークフロー";
-    state.nodes.forEach(n=>{ const m=/^n(\d+)/.exec(n.id); if(m)seq=Math.max(seq,+m[1]+1); if(n.type)delete n.type; });
-    canvas.querySelectorAll('.node').forEach(el=>el.remove());
-    renderAll();
+  function save(){ try{ localStorage.setItem(LS_KEY,JSON.stringify(doc)); }catch(e){} }
+  function normalize(){
+    if(!doc||!Array.isArray(doc.tabs)||!doc.tabs.length){ doc=newDoc(); return; }
+    if(typeof doc.activeTab!=='number'||doc.activeTab<0||doc.activeTab>=doc.tabs.length) doc.activeTab=0;
+    doc.tabs.forEach(t=>{
+      if(t.mode!=='mind') t.mode='flow';
+      t.nodes=t.nodes||[]; t.edges=t.edges||[]; if(!t.title)t.title="無題のワークフロー";
+      const mt=/^t(\d+)/.exec(t.id||''); if(mt)seq=Math.max(seq,+mt[1]+1);
+      if(!t.id)t.id='t'+(seq++)+'_'+Math.floor(Math.random()*1e4);
+      t.nodes.forEach(n=>{ const m=/^n(\d+)/.exec(n.id); if(m)seq=Math.max(seq,+m[1]+1); if(n.type)delete n.type; });
+    });
   }
-  function loadLocal(){ try{ const s=localStorage.getItem(LS_KEY); if(s){ load(JSON.parse(s)); return true; } }catch(e){} return false; }
+  function loadLocal(){
+    try{
+      const s=localStorage.getItem(LS_KEY);
+      if(s){ const o=JSON.parse(s); if(o&&o.tabs){ doc=o; normalize(); return true; } }
+      const old=localStorage.getItem(OLD_KEY);
+      if(old){ const o=JSON.parse(old); const t=newTab(o.title); t.nodes=o.nodes||[]; t.edges=o.edges||[]; doc={activeTab:0,tabs:[t]}; normalize(); return true; }
+    }catch(e){}
+    return false;
+  }
 
   // ---- wiring ----
-  document.getElementById('flowTitle').addEventListener('input',e=>{state.title=e.target.value;save();});
+  titleInput.addEventListener('input',e=>{ cur().title=e.target.value; renderTabs(); save(); });
+  modeToggle.querySelectorAll('button').forEach(b=>b.addEventListener('click',()=>{ if(cur().mode===b.dataset.mode)return; cur().mode=b.dataset.mode; sel=null; syncHeader(); renderTabs(); renderAll(); save(); }));
   document.getElementById('exportBtn').addEventListener('click',showExport);
   document.getElementById('fab').addEventListener('click',addNodeCentered);
   document.getElementById('closeExport').addEventListener('click',()=>document.getElementById('exportOverlay').classList.remove('show'));
   document.getElementById('exportOverlay').addEventListener('pointerdown',e=>{ if(e.target.id==='exportOverlay')e.currentTarget.classList.remove('show'); });
   document.getElementById('copyBtn').addEventListener('click',()=>{ const t=document.getElementById('exportText').textContent; navigator.clipboard.writeText(t).then(()=>hint("コピーしました")).catch(()=>hint("コピー失敗：枠内を手動選択してください")); });
   document.querySelectorAll('.tab').forEach(t=>t.addEventListener('click',()=>{ document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active')); t.classList.add('active'); exportTab=t.dataset.tab; showExport(); }));
-  document.getElementById('saveBtn').addEventListener('click',()=>{ const blob=new Blob([JSON.stringify(state,null,2)],{type:'application/json'}); const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=(state.title||'flow').replace(/[\\/:*?"<>|]/g,'_')+'.json'; a.click(); });
+  document.getElementById('saveBtn').addEventListener('click',()=>{ const blob=new Blob([JSON.stringify(doc,null,2)],{type:'application/json'}); const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=(cur().title||'flow').replace(/[\\/:*?"<>|]/g,'_')+'.json'; a.click(); });
   document.getElementById('loadBtn').addEventListener('click',()=>document.getElementById('fileInput').click());
-  document.getElementById('fileInput').addEventListener('change',e=>{ const f=e.target.files[0]; if(!f)return; const r=new FileReader(); r.onload=()=>{ try{ load(JSON.parse(r.result)); save(); hint("読み込みました"); }catch(err){ hint("ファイルが不正です"); } }; r.readAsText(f); e.target.value=''; });
-  document.getElementById('clearBtn').addEventListener('click',()=>{ if(confirm("全て消去しますか？")){ state={title:state.title,nodes:[],edges:[]}; canvas.querySelectorAll('.node').forEach(el=>el.remove()); sel=null; renderAll(); save(); } });
+  document.getElementById('fileInput').addEventListener('change',e=>{ const f=e.target.files[0]; if(!f)return; const r=new FileReader();
+    r.onload=()=>{ try{ const o=JSON.parse(r.result);
+      if(o&&o.tabs){ doc=o; normalize(); hint("読み込みました（全タブ）"); }
+      else if(o&&o.nodes){ const t=newTab(o.title); t.nodes=o.nodes; t.edges=o.edges||[]; if(o.mode==='mind')t.mode='mind'; doc.tabs.push(t); doc.activeTab=doc.tabs.length-1; normalize(); hint("新しいタブに読み込みました"); }
+      else throw 0;
+      rebuild(); save();
+    }catch(err){ hint("ファイルが不正です"); } };
+    r.readAsText(f); e.target.value='';
+  });
+  document.getElementById('clearBtn').addEventListener('click',()=>{ if(confirm("このタブを全て消去しますか？")){ cur().nodes=[]; cur().edges=[]; canvas.querySelectorAll('.node').forEach(el=>el.remove()); sel=null; renderAll(); save(); } });
 
   canvas.addEventListener('dblclick',e=>{ if(e.target!==canvas&&e.target!==svg&&e.target!==emptyEl&&!emptyEl.contains(e.target))return; const r=canvas.getBoundingClientRect(); addNodeAt(e.clientX-r.left,e.clientY-r.top); });
   canvas.addEventListener('pointerdown',e=>{ if(e.target===canvas||e.target===svg) clearSel(); });
@@ -409,7 +589,8 @@
   });
 
   // ---- boot ----
-  if(!loadLocal()){ state={title:"無題のワークフロー",nodes:[],edges:[]}; renderAll(); }
+  if(!loadLocal()){ doc=newDoc(); }
+  syncHeader(); renderTabs(); renderAll();
   wrap.scrollLeft=4000/2-wrap.clientWidth/2; wrap.scrollTop=3000/2-wrap.clientHeight/2;
 })();
 </script>
